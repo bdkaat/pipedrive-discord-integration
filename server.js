@@ -1,4 +1,4 @@
-// server.js - FIXED VERSION
+// server.js - FIXED FOR PIPEDRIVE V2 WEBHOOK FORMAT
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
@@ -46,6 +46,41 @@ function formatCurrency(value, currency = 'USD') {
     style: 'currency',
     currency: currency
   }).format(value);
+}
+
+// Get person and org names from Pipedrive API
+async function getAdditionalInfo(dealData) {
+  const info = { ...dealData };
+  
+  // Try to get person name
+  if (dealData.person_id && CONFIG.PIPEDRIVE_API_TOKEN) {
+    try {
+      const personResponse = await axios.get(
+        `https://${CONFIG.PIPEDRIVE_COMPANY_DOMAIN}.pipedrive.com/api/v1/persons/${dealData.person_id}?api_token=${CONFIG.PIPEDRIVE_API_TOKEN}`
+      );
+      if (personResponse.data?.data?.name) {
+        info.person_name = personResponse.data.data.name;
+      }
+    } catch (error) {
+      console.log('Could not fetch person name');
+    }
+  }
+  
+  // Try to get org name
+  if (dealData.org_id && CONFIG.PIPEDRIVE_API_TOKEN) {
+    try {
+      const orgResponse = await axios.get(
+        `https://${CONFIG.PIPEDRIVE_COMPANY_DOMAIN}.pipedrive.com/api/v1/organizations/${dealData.org_id}?api_token=${CONFIG.PIPEDRIVE_API_TOKEN}`
+      );
+      if (orgResponse.data?.data?.name) {
+        info.org_name = orgResponse.data.data.name;
+      }
+    } catch (error) {
+      console.log('Could not fetch org name');
+    }
+  }
+  
+  return info;
 }
 
 // Create Discord embed message
@@ -108,17 +143,32 @@ function createDiscordMessage(dealData, eventType) {
       inline: true
     });
   }
-  
-  if (dealData.user_name) {
+
+  // Add stage info if available
+  if (dealData.stage_id) {
     embed.fields.push({
-      name: '🎯 Deal Owner',
-      value: dealData.user_name,
+      name: '📊 Stage',
+      value: `Stage ${dealData.stage_id}`,
+      inline: true
+    });
+  }
+
+  // Add expected close date if available
+  if (dealData.expected_close_date) {
+    embed.fields.push({
+      name: '📅 Expected Close',
+      value: new Date(dealData.expected_close_date).toLocaleDateString(),
       inline: true
     });
   }
 
   if (CONFIG.PIPEDRIVE_COMPANY_DOMAIN && dealData.id) {
     embed.url = `https://${CONFIG.PIPEDRIVE_COMPANY_DOMAIN}.pipedrive.com/deal/${dealData.id}`;
+    embed.fields.push({
+      name: '🔗 Quick Access',
+      value: `[View in Pipedrive](${embed.url})`,
+      inline: false
+    });
   }
 
   return {
@@ -141,35 +191,37 @@ async function sendToDiscord(message) {
 
 // Main webhook handler function
 async function handlePipedriveWebhook(req, res) {
-  console.log('Received webhook:', JSON.stringify(req.body, null, 2));
+  console.log('Received webhook - Pipedrive v2 format');
   
-  const { event, current, previous, meta } = req.body;
+  const { data, previous, meta } = req.body;
   
-  // Handle both event formats (Pipedrive v1 and simple format)
-  let eventType = event;
-  let dealData = current;
-  
-  // If meta exists, this is Pipedrive v1 format
-  if (meta && meta.action && meta.object) {
-    eventType = `${meta.action}.${meta.object}`;
-    console.log('Detected Pipedrive v1 format, event:', eventType);
-  }
-  
-  if (!eventType || !dealData) {
-    console.log('Invalid webhook data - missing event or current data');
+  // Handle Pipedrive v2 webhook format
+  if (!data || !meta) {
+    console.log('Invalid webhook format');
     return res.status(400).json({ error: 'Invalid webhook data' });
   }
   
-  // Handle new deal creation
-  if (eventType === 'added.deal') {
+  console.log(`Processing ${meta.action} for ${meta.entity} ID: ${data.id}`);
+  
+  // Only process deal webhooks
+  if (meta.entity !== 'deal') {
+    console.log('Not a deal webhook, ignoring');
+    return res.json({ status: 'Not a deal webhook' });
+  }
+  
+  // Get additional info if API token is available
+  const dealData = await getAdditionalInfo(data);
+  
+  // Handle new deal (when action is "add" or when there's no previous data)
+  if (meta.action === 'add' || (!previous && data.status === 'open')) {
     console.log('Processing new deal:', dealData.title);
     const discordMessage = createDiscordMessage(dealData, 'added');
     await sendToDiscord(discordMessage);
     return res.json({ status: 'New deal notification sent' });
   }
   
-  // Handle deal won
-  if (eventType === 'updated.deal' && dealData.status === 'won' && (!previous || previous.status !== 'won')) {
+  // Handle deal won (when status changes to won)
+  if (meta.action === 'change' && data.status === 'won' && (!previous || previous.status !== 'won')) {
     console.log('Processing won deal:', dealData.title);
     const discordMessage = createDiscordMessage(dealData, 'won');
     await sendToDiscord(discordMessage);
@@ -177,11 +229,11 @@ async function handlePipedriveWebhook(req, res) {
   }
   
   // Log other events for debugging
-  console.log('Event not processed:', eventType, 'Status:', dealData.status);
+  console.log(`Event processed but no notification sent. Action: ${meta.action}, Status: ${data.status}`);
   res.json({ status: 'Event received but no notification needed' });
 }
 
-// IMPORTANT: Accept webhooks on BOTH root and /webhook/pipedrive paths
+// Accept webhooks on both root and /webhook/pipedrive paths
 app.post('/', handlePipedriveWebhook);
 app.post('/webhook/pipedrive', handlePipedriveWebhook);
 
@@ -208,7 +260,7 @@ app.get('/', (req, res) => {
 // Start server
 app.listen(CONFIG.PORT, () => {
   console.log(`Server running on port ${CONFIG.PORT}`);
-  console.log('Ready to receive Pipedrive webhooks on / or /webhook/pipedrive');
+  console.log('Ready to receive Pipedrive v2 webhooks');
   
   if (!CONFIG.DISCORD_WEBHOOK_URL) {
     console.warn('⚠️  DISCORD_WEBHOOK_URL not set');
