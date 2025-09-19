@@ -1,4 +1,4 @@
-// server.js
+// server.js - FIXED VERSION
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
@@ -8,11 +8,11 @@ app.use(express.json());
 
 // Configuration
 const CONFIG = {
-  DISCORD_WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL, // Your Discord webhook URL
-  PIPEDRIVE_API_TOKEN: process.env.PIPEDRIVE_API_TOKEN, // Your Pipedrive API token
-  PIPEDRIVE_COMPANY_DOMAIN: process.env.PIPEDRIVE_COMPANY_DOMAIN, // e.g., 'yourcompany'
+  DISCORD_WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL,
+  PIPEDRIVE_API_TOKEN: process.env.PIPEDRIVE_API_TOKEN,
+  PIPEDRIVE_COMPANY_DOMAIN: process.env.PIPEDRIVE_COMPANY_DOMAIN,
   PORT: process.env.PORT || 3000,
-  WEBHOOK_SECRET: process.env.WEBHOOK_SECRET // Optional: for webhook verification
+  WEBHOOK_SECRET: process.env.WEBHOOK_SECRET
 };
 
 // Celebration emojis and messages
@@ -53,7 +53,6 @@ function createDiscordMessage(dealData, eventType) {
   const isNewDeal = eventType === 'added';
   const celebration = getRandomCelebration(isNewDeal ? 'newDeal' : 'wonDeal');
   
-  // Random fun messages
   const funMessages = isNewDeal ? [
     'Time to make magic happen! ✨',
     'Let\'s turn this opportunity into gold! 🏅',
@@ -70,11 +69,10 @@ function createDiscordMessage(dealData, eventType) {
   
   const randomFunMessage = funMessages[Math.floor(Math.random() * funMessages.length)];
   
-  // Build the embed
   const embed = {
     title: `${celebration.emoji} ${celebration.message} ${celebration.emoji}`,
     description: randomFunMessage,
-    color: isNewDeal ? 0x00ff00 : 0xffd700, // Green for new, gold for won
+    color: isNewDeal ? 0x00ff00 : 0xffd700,
     fields: [
       {
         name: '📝 Deal Name',
@@ -118,43 +116,13 @@ function createDiscordMessage(dealData, eventType) {
       inline: true
     });
   }
-  
-  if (dealData.pipeline_name) {
-    embed.fields.push({
-      name: '📊 Pipeline',
-      value: dealData.pipeline_name,
-      inline: true
-    });
-  }
-  
-  if (dealData.stage_name) {
-    embed.fields.push({
-      name: '📍 Stage',
-      value: dealData.stage_name,
-      inline: true
-    });
-  }
-  
-  if (dealData.expected_close_date) {
-    embed.fields.push({
-      name: '📅 Expected Close',
-      value: new Date(dealData.expected_close_date).toLocaleDateString(),
-      inline: true
-    });
-  }
 
-  // Add deal link if available
   if (CONFIG.PIPEDRIVE_COMPANY_DOMAIN && dealData.id) {
     embed.url = `https://${CONFIG.PIPEDRIVE_COMPANY_DOMAIN}.pipedrive.com/deal/${dealData.id}`;
-    embed.fields.push({
-      name: '🔗 Quick Access',
-      value: `[View in Pipedrive](${embed.url})`,
-      inline: false
-    });
   }
 
   return {
-    content: isNewDeal ? '@here New opportunity!' : '@here Celebration time! 🎉',
+    content: isNewDeal ? '🎉 New opportunity!' : '🎊 Celebration time!',
     embeds: [embed]
   };
 }
@@ -171,47 +139,51 @@ async function sendToDiscord(message) {
   }
 }
 
-// Webhook endpoint for Pipedrive
-app.post('/webhook/pipedrive', async (req, res) => {
-  console.log('Received webhook:', req.body);
+// Main webhook handler function
+async function handlePipedriveWebhook(req, res) {
+  console.log('Received webhook:', JSON.stringify(req.body, null, 2));
   
-  // Optional: Verify webhook signature if you set up a secret
-  if (CONFIG.WEBHOOK_SECRET && req.headers['x-pipedrive-signature']) {
-    const signature = crypto
-      .createHmac('sha256', CONFIG.WEBHOOK_SECRET)
-      .update(JSON.stringify(req.body))
-      .digest('hex');
-    
-    if (signature !== req.headers['x-pipedrive-signature']) {
-      console.error('Invalid webhook signature');
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
+  const { event, current, previous, meta } = req.body;
+  
+  // Handle both event formats (Pipedrive v1 and simple format)
+  let eventType = event;
+  let dealData = current;
+  
+  // If meta exists, this is Pipedrive v1 format
+  if (meta && meta.action && meta.object) {
+    eventType = `${meta.action}.${meta.object}`;
+    console.log('Detected Pipedrive v1 format, event:', eventType);
   }
   
-  const { event, current, previous } = req.body;
-  
-  // Check if this is a relevant event
-  if (!event || !current) {
+  if (!eventType || !dealData) {
+    console.log('Invalid webhook data - missing event or current data');
     return res.status(400).json({ error: 'Invalid webhook data' });
   }
   
   // Handle new deal creation
-  if (event === 'added.deal') {
-    const discordMessage = createDiscordMessage(current, 'added');
+  if (eventType === 'added.deal') {
+    console.log('Processing new deal:', dealData.title);
+    const discordMessage = createDiscordMessage(dealData, 'added');
     await sendToDiscord(discordMessage);
     return res.json({ status: 'New deal notification sent' });
   }
   
-  // Handle deal won (deal updated with status = won)
-  if (event === 'updated.deal' && current.status === 'won' && previous?.status !== 'won') {
-    const discordMessage = createDiscordMessage(current, 'won');
+  // Handle deal won
+  if (eventType === 'updated.deal' && dealData.status === 'won' && (!previous || previous.status !== 'won')) {
+    console.log('Processing won deal:', dealData.title);
+    const discordMessage = createDiscordMessage(dealData, 'won');
     await sendToDiscord(discordMessage);
     return res.json({ status: 'Deal won notification sent' });
   }
   
-  // Event not relevant for notifications
+  // Log other events for debugging
+  console.log('Event not processed:', eventType, 'Status:', dealData.status);
   res.json({ status: 'Event received but no notification needed' });
-});
+}
+
+// IMPORTANT: Accept webhooks on BOTH root and /webhook/pipedrive paths
+app.post('/', handlePipedriveWebhook);
+app.post('/webhook/pipedrive', handlePipedriveWebhook);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -222,13 +194,13 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Root endpoint
+// Root GET endpoint
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Pipedrive-Discord Integration is running!',
     endpoints: {
-      webhook: '/webhook/pipedrive',
-      health: '/health'
+      webhook: '/ or /webhook/pipedrive (POST)',
+      health: '/health (GET)'
     }
   });
 });
@@ -236,9 +208,8 @@ app.get('/', (req, res) => {
 // Start server
 app.listen(CONFIG.PORT, () => {
   console.log(`Server running on port ${CONFIG.PORT}`);
-  console.log('Ready to receive Pipedrive webhooks');
+  console.log('Ready to receive Pipedrive webhooks on / or /webhook/pipedrive');
   
-  // Check configuration
   if (!CONFIG.DISCORD_WEBHOOK_URL) {
     console.warn('⚠️  DISCORD_WEBHOOK_URL not set');
   }
